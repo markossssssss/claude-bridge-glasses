@@ -1,0 +1,5 @@
+{
+  "pages": ["pages/index/index"],
+  "permissions": ["INTERNET", "SPEECH_RECOGNITION", "SPEAKER", "RECORD_AUDIO"],
+  "window": { "navigationBarTitleText": "Claude" }
+}
