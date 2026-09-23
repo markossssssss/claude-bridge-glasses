@@ -36,6 +36,7 @@ function flushLogs() {
 }
 // 仅测试构建为 true：浏览器预览没有语音识别，单击用预设句子代替
 const DEV_TEXT = 'false';
+const BUILD = 'ab958f2';   // 构建来源提交，日志里能确认眼镜跑的是哪一版
 
 const LISTEN_TIMEOUT_MS = 15000;
 const BOARD_POLL_MS = 8000;
@@ -141,7 +142,7 @@ export default {
   onLoad(options) {
     const q = options && (typeof options.query === 'string' ? options.query : options.text);
     this.flushTimer = setInterval(flushLogs, 2000);
-    dlog('load token=' + (TOKEN ? 'yes' : 'no') + ' SR=' + typeof SpeechRecognition + ' query=' + JSON.stringify(q || ''));
+    dlog('load build=' + BUILD + ' token=' + (TOKEN ? 'yes' : 'no') + ' SR=' + typeof SpeechRecognition + ' query=' + JSON.stringify(q || ''));
     if (!TOKEN) { this.startPairing(); return; }
     this.startApp(q);
   },
