@@ -36,7 +36,7 @@ function flushLogs() {
 }
 // 仅测试构建为 true：浏览器预览没有语音识别，单击用预设句子代替
 const DEV_TEXT = 'false';
-const BUILD = '0923-1222';   // 构建来源提交，日志里能确认眼镜跑的是哪一版
+const BUILD = '0923-1246';   // 构建来源提交，日志里能确认眼镜跑的是哪一版
 
 const LISTEN_TIMEOUT_MS = 15000;
 const BOARD_POLL_MS = 8000;
@@ -150,7 +150,27 @@ export default {
   startApp(q) {
     this.showBoard();
     if (!this.pollTimer) this.pollTimer = setInterval(() => this.tick(), BOARD_POLL_MS);
-    if (q) this.ask(q);
+    const real = this.launchIntent(q);
+    if (real) this.ask(real);
+  },
+
+  // 系统助手唤起应用时，会把整句唤起语（"打开claude控制台"）当参数塞进来。
+  // 那不是你对某个会话说的话，原样发出去就成了第一条指令，会发给当时选中的会话。
+  // 判断方式：把"打开/启动…"和应用名剥掉，如果什么都不剩，这句话就只是唤起语，丢掉；
+  // 还剩东西说明你是带着话来的（"打开claude控制台 沙盒在做什么"），原句原样送，让 relay 自己解析。
+  launchIntent(q) {
+    const raw = String(q || '').trim();
+    if (!raw) return '';
+    const rest = raw
+      .replace(/^(帮我|请|麻烦|给我)*\s*(打开|开启|启动|进入|唤起|召唤|运行|使用|用)?\s*/i, '')
+      .replace(/^(?:(?:claude|clode|cloud|克劳德|克劳迪)\s*)?(?:控制台|控制中心|助手|console)?\s*/i, '')
+      .replace(/^[的了吧呢啊吗，,。.!！？?\s]+/, '')
+      .trim();
+    if (!rest) { dlog('launch phrase ignored ' + JSON.stringify(raw)); return ''; }
+    // 带着话来的：唤起语后面那部分才是你说的（"打开claude控制台，沙盒在做什么"→"沙盒在做什么"）；
+    // 开头压根不是唤起语的，原句原样送。
+    const named = /^(帮我|请|麻烦|给我)*\s*(打开|开启|启动|进入|唤起|召唤|运行|使用|用)?\s*(?:(?:claude|clode|cloud|克劳德|克劳迪)\s*)?(?:控制台|控制中心|助手|console)/i.test(raw);
+    return named ? rest : raw;
   },
 
   // 首次配对：显示 6 位码，在 Hub 上批准后拿到这副眼镜的专属 token
