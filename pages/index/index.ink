@@ -40,7 +40,7 @@ const DEV_TEXT = 'false';
 const LISTEN_TIMEOUT_MS = 15000;
 const BOARD_POLL_MS = 8000;
 const SESSION_POLL_MS = 20000;
-const BOARD_ROWS = 4;          // 管理台一屏 4 个 agent，每个两行
+const BOARD_ROWS = 8;          // 管理台一屏 4 个 agent，每个两行
 // 480x352 HUD，18px 字：每行约 24 个汉字，正文区约 11 行
 const LINE_CHARS = 24;
 const PAGE_LINES = 11;
@@ -114,7 +114,7 @@ export default {
     status: 'idle', label: '单击说话', heard: '', answer: '', hint: '', top: '单击说话', main: '', lines: [], session: '', others: '',
   },
   board: [], sel: 0, now: 0, sessionTicks: 0,
-  recognition: null, listenTimer: null, pollTimer: null, flushTimer: null, hookTimer: null, tapTimer: null, hookListenAt: 0, aborting: false,
+  recognition: null, listenTimer: null, pollTimer: null, flushTimer: null, hookTimer: null, aborting: false,
   pendingChat: '', pendingIndex: 0,
   lastSwipe: 0, pager: null, epoch: 0, devTurn: 0,
   target: '',        // 管理台上说话时对哪个 agent
@@ -215,22 +215,24 @@ export default {
   renderBoard() {
     const b = this.board, n = b.length;
     const busy = b.filter((s) => s.busy).length, pend = b.filter((s) => s.pending).length, unread = b.filter((s) => s.unread).length;
-    const start = Math.max(0, Math.min(this.sel - 1, n - BOARD_ROWS));
+    const start = Math.max(0, Math.min(this.sel - 2, n - BOARD_ROWS));
     const rows = b.slice(start, start + BOARD_ROWS).map((s, k) => {
       const i = start + k, selected = i === this.sel;
-      const state = !s.online ? '离线' : s.pending ? '待批' : s.unread ? '新回复' + s.unread : s.busy ? '忙 ' + ago(this.now - s.busySince) : '空闲';
-      const branch = s.branch ? ' · ' + s.branch.split('/').pop() : '';
+      // 分支对所有 workbench 会话都一样，没有区分度，不显示；cockpit 里没接管的标出来
+      const state = !s.online ? '离线' : s.adoptable ? (s.pending ? '待确认·未接管' : s.busy ? '忙·未接管' : '未接管')
+        : s.pending ? '待批' : s.unread ? '新回复' + s.unread : s.busy ? '忙' + ago(this.now - s.busySince) : '空闲';
       const sub = s.pending ? '待批：' + s.permission
         : s.unread ? '回复：' + s.last
         : s.busy ? '在做：' + s.task
         : s.last ? '最近：' + s.last : s.task ? '最近：' + s.task : '还没有对话';
       const lvl = selected ? ' sel' : attention(s) <= 1 ? ' hot' : '';
-      return { title: clipW(s.label + ' · ' + state + branch, 23), sub: clipW(sub, 26), lvl: lvl, selected: selected, id: s.name };
+      return { title: clipW(s.label + ' · ' + state, 23), sub: clipW(sub, 26), lvl: lvl, selected: selected, id: s.name };
     });
     const lines = [];
     rows.forEach((r, k) => {
       lines.push({ id: 'bt' + k, cls: 'ln row' + r.lvl, bcls: r.selected ? 'bar on' : 'bar', tcls: 'tx bt', t: r.title });
-      lines.push({ id: 'bs' + k, cls: 'ln row gap' + r.lvl, bcls: r.selected ? 'bar on' : 'bar', tcls: 'tx bs', t: r.sub });
+      // 只有选中的展开详情，一屏能多放几个 agent
+      if (r.selected) lines.push({ id: 'bs' + k, cls: 'ln row gap' + r.lvl, bcls: 'bar on', tcls: 'tx bs', t: r.sub });
     });
     if (!rows.length) lines.push({ id: 'b-empty', cls: 'ln', bcls: 'bar', tcls: 'tx', t: '还没有 agent，说"新建会话叫…"' });
     const top = 'Agent 管理台 · ' + n + '个' + (busy ? ' · 忙' + busy : '') + (pend ? ' · 待批' + pend : '') + (unread ? ' · 新回复' + unread : '');
@@ -359,19 +361,21 @@ export default {
     this.listen();
   },
 
-  // 滑动：方向键在按下时就接管（阻止默认滚动），松开时不重复处理
+  // 真机实测（2026-09-23 日志统计）：
+  //   单击 = GlobalHook → Enter（间隔 147–540ms，中位 494）
+  //   滑动 = GlobalHook → ArrowRight/Left → ArrowDown/Up（首个方向键 9–345ms）
+  //   双击 = GlobalHook ×2 → Backspace
+  // 所以 GlobalHook 只当"触控板被碰到"，不据此做动作；动作只看 Enter / 方向键 / Backspace。
   onKeyDown(event) {
     dlog('key down ' + event.code + ' ' + (event.key || ''));
     const dir = this.swipeDir(event);
     if (!dir) return;
     event.preventDefault();
-    this.cancelHook();  // 滑动前宿主会先发 GlobalHook：它不是单击
-    // agent 页里 GlobalHook 已经抢先开始听了：紧跟着来的是滑动，就静默取消识别
-    if (this.hookListenAt && Date.now() - this.hookListenAt < 350 && this.recognition) { dlog('swipe after hook: abort listen'); this.abortListen(); }
+    this.cancelHook();
     const now = Date.now();
-    if (this.lastSwipe && now - this.lastSwipe < 250) return;  // 去抖（防同一手势重复事件，不挡人手连滑）
+    if (this.lastSwipe && now - this.lastSwipe < 250) return;  // 一次滑动会连发两个方向键
     this.lastSwipe = now;
-    if (this.data.status === 'listening') return;
+    if (this.data.status === 'listening') this.abortListen();  // 听的时候滑动 = 放弃这次说话
     if (this.data.view === 'board') { this.moveSel(dir); return; }
     // 双击是系统级"退出应用"，不会发给页面，所以返回靠向前滑：
     //   阅读中：向后滑下一页，向前滑上一页，第一页再向前滑退出阅读
@@ -396,16 +400,11 @@ export default {
   onKeyUp(event) {
     dlog('key up ' + event.code + ' ' + (event.key || ''));
     if (this.swipeDir(event)) { event.preventDefault(); return; }
-    // GlobalHook = 触控板被碰了一下，每个手势前都会先来；有的固件单击只发它。
-    // 等 250ms：来了方向键/Enter 就交给它们，什么都没来才算单击。
+    // GlobalHook = 触控板被碰了一下，单击和滑动之前都会来，本身不代表动作。
+    // 等 800ms：期间来了 Enter/方向键就交给它们；都没来才兜底当单击（有的固件只发它）。
     if (event.code === 'GlobalHook') {
       this.cancelHook();
-      // 语音识别必须在用户交互期间同步启动（文档：start() must be called during a user interaction），
-      // 所以在 agent 页里收到 GlobalHook 就立即开始听；若随后来的是方向键再取消
-      if (this.data.view === 'session' && !this.pager && this.data.status !== 'listening' && this.data.status !== 'thinking') {
-        this.hookListenAt = Date.now(); this.listen(); return;
-      }
-      this.hookTimer = setTimeout(() => { this.hookTimer = null; this.tap(); }, 250);
+      this.hookTimer = setTimeout(() => { this.hookTimer = null; dlog('hook fallback tap'); this.tap(); }, 800);
       return;
     }
     // 返回键（有的宿主双击发 Backspace）：管理台上交给系统（退出应用），其他情况按双击处理
@@ -415,22 +414,13 @@ export default {
     }
     if (event.code !== 'Enter') return;
     this.cancelHook();
-    // 同一次单击：GlobalHook 已经开始听了，紧跟的 Enter 忽略
-    if (this.hookListenAt && Date.now() - this.hookListenAt < 350) { this.hookListenAt = 0; return; }
-    this.tap();  // 立即处理（双击是系统级退出，不再延迟判定双击）
-  },
-
-  // 模拟器的"双击"是连续两次单击（GlobalHook+Enter ×2），不发 Backspace：
-  // 单击先等 600ms（模拟器双击按钮两下间隔约 0.4–0.5s），期间再来一次就算双击。
-  tapIntent() {
-    if (this.tapTimer) { clearTimeout(this.tapTimer); this.tapTimer = null; this.doubleTap(); return; }
-    this.tapTimer = setTimeout(() => { this.tapTimer = null; this.tap(); }, 600);
+    this.tap();  // 单击：语音识别就在这个事件里同步启动（必须在用户交互当下）
   },
 
   // 双击 = 返回：在听 → 停止；阅读中 → 退出阅读；agent 页 → 回管理台；管理台 → 不动
   doubleTap() {
     dlog('double tap');
-    if (this.data.status === 'listening') { this.stopListening(); return; }
+    if (this.data.status === 'listening') { this.abortListen(); return; }
     if (this.pager) { this.exitPager(); return; }
     if (this.data.view === 'session') { this.showBoard(); return; }
   },
