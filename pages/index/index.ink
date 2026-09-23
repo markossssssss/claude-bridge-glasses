@@ -221,9 +221,10 @@ export default {
       // 分支对所有 workbench 会话都一样，没有区分度，不显示；cockpit 里没接管的标出来
       const state = !s.online ? '离线' : s.adoptable ? (s.pending ? '待确认·未接管' : s.busy ? '忙·未接管' : '未接管')
         : s.pending ? '待批' : s.unread ? '新回复' + s.unread : s.busy ? '忙' + ago(this.now - s.busySince) : '空闲';
-      const sub = s.pending ? '待批：' + s.permission
+      const sub = s.adoptable ? (s.task ? '未接管 · ' + s.task : '未接管，单击进入会自动接管')
+        : s.pending ? '待批：' + (s.permission || s.last || '等你确认')
         : s.unread ? '回复：' + s.last
-        : s.busy ? '在做：' + s.task
+        : s.busy ? '在做：' + (s.task || '…')
         : s.last ? '最近：' + s.last : s.task ? '最近：' + s.task : '还没有对话';
       const lvl = selected ? ' sel' : attention(s) <= 1 ? ' hot' : '';
       return { title: clipW(s.label + ' · ' + state, 23), sub: clipW(sub, 26), lvl: lvl, selected: selected, id: s.name };
@@ -232,7 +233,7 @@ export default {
     rows.forEach((r, k) => {
       lines.push({ id: 'bt' + k, cls: 'ln row' + r.lvl, bcls: r.selected ? 'bar on' : 'bar', tcls: 'tx bt', t: r.title });
       // 只有选中的展开详情，一屏能多放几个 agent
-      if (r.selected) lines.push({ id: 'bs' + k, cls: 'ln row gap' + r.lvl, bcls: 'bar on', tcls: 'tx bs', t: r.sub });
+      if (r.selected) lines.push({ id: 'bs' + k, cls: 'ln row gap' + r.lvl, bcls: 'bar', tcls: 'tx bs', t: r.sub });  // 竖条只画在标题行
     });
     if (!rows.length) lines.push({ id: 'b-empty', cls: 'ln', bcls: 'bar', tcls: 'tx', t: '还没有 agent，说"新建会话叫…"' });
     const top = 'Agent 管理台 · ' + n + '个' + (busy ? ' · 忙' + busy : '') + (pend ? ' · 待批' + pend : '') + (unread ? ' · 新回复' + unread : '');
@@ -583,13 +584,13 @@ export default {
         <text class="{{item.tcls}}">{{item.t}}</text>
       </view>
     </view>
-    <text class="rule">─────────────────────────────────────────────────</text>
+    <text class="rule">────────────────────────────────────────────────────────────</text>
     <text class="foot">{{foot}}</text>
   </view>
 </page>
 <style>
-.page { width: 100%; height: 100%; padding: 12px 16px 10px 2px; background: #000000; display: flex; flex-direction: column; }
-.top { color: #00ff00; opacity: 0.6; font-size: 16px; margin-bottom: 10px; padding-left: 14px; }
+.page { width: 100%; height: 100%; padding: 12px 14px 10px 8px; background: #000000; display: flex; flex-direction: column; }
+.top { color: #00ff00; opacity: 0.55; font-size: 16px; margin-bottom: 8px; padding-left: 14px; }
 .main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
 .ln { display: flex; flex-direction: row; }
 /* 竖条：每行都有，只有选中行可见，保证文字对齐 */
@@ -598,12 +599,12 @@ export default {
 .tx { flex: 1; color: #00ff00; font-size: 18px; line-height: 1.33; }
 .tx.q { opacity: 0.55; font-size: 16px; }
 /* 管理台：未选中调暗、选中全亮；每个 agent 两行，组间留白 */
-.row { opacity: 0.45; }
-.row.hot { opacity: 0.7; }
+.row { opacity: 0.72; }   /* 单色屏上内容要比页头亮 */
+.row.hot { opacity: 0.85; }
 .row.sel { opacity: 1; }
 .row.gap { margin-bottom: 14px; }
-.tx.bt { font-size: 20px; font-weight: bold; }
-.tx.bs { font-size: 17px; opacity: 0.8; }
-.rule { color: #00ff00; opacity: 0.3; font-size: 12px; padding-left: 14px; }
-.foot { color: #00ff00; opacity: 0.3; font-size: 14px; padding-left: 14px; }
+.tx.bt { font-size: 20px; font-weight: bold; line-height: 1.7; }  /* 行距放大用掉底部空白，仍 8 行 */
+.tx.bs { font-size: 17px; opacity: 0.85; line-height: 1.5; }
+.rule { color: #00ff00; opacity: 0.3; font-size: 12px; padding-left: 14px; overflow: hidden; }
+.foot { color: #00ff00; opacity: 0.55; font-size: 14px; font-weight: bold; padding-left: 14px; }  /* 细笔画强光下先糊 */
 </style>
