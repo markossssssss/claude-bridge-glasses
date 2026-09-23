@@ -36,7 +36,7 @@ function flushLogs() {
 }
 // 仅测试构建为 true：浏览器预览没有语音识别，单击用预设句子代替
 const DEV_TEXT = 'false';
-const BUILD = 'f2e5d98';   // 构建来源提交，日志里能确认眼镜跑的是哪一版
+const BUILD = '0923-1148';   // 构建来源提交，日志里能确认眼镜跑的是哪一版
 
 const LISTEN_TIMEOUT_MS = 15000;
 const BOARD_POLL_MS = 8000;
@@ -195,6 +195,8 @@ export default {
   // ---------------------------------------------------------------- 管理台
   showBoard() {
     this.epoch++; this.pager = null; this.pendingChat = '';
+    // 离开会话即交还控制权：眼镜不在对话里就不该占着它，空闲的自动接管会话回到电脑
+    request('POST', '/api/glasses/leave', {}).then(function (r) { if (r && r.released) dlog('released ' + r.released); }).catch(function () {});
     this.data.view = 'board'; this.setData({ status: 'idle' });
     dlog('board-view');
     this.refreshBoard();
@@ -247,9 +249,7 @@ export default {
   moveSel(dir) {
     if (!this.board.length) return;
     this.sel = (this.sel + dir + this.board.length) % this.board.length;
-    this.renderBoard();
-    const s = this.board[this.sel];
-    this.speak(s.label + (s.pending ? '，待批' : s.unread ? '，有新回复' : s.busy ? '，在忙' : ''));
+    this.renderBoard();  // 不朗读：滑动是高频动作，TTS 有延迟且会压掉下一次识别
   },
 
   async enterSession(name) {
@@ -283,7 +283,6 @@ export default {
     try {
       const r = await request('POST', '/api/glasses/select', { dir: dir });
       if (r.type !== 'selected') { this.set('error', { hint: r.text || '没有可切换的会话' }); return; }
-      this.speak(r.label + (r.unread ? '，有' + r.unread + '条新回复' : '') + (r.pending ? '，有待批请求' : ''));
       this.set('idle', { session: r.label + ' ' + r.index + '/' + r.total, heard: '', answer: '', hint: '' });
       if (r.unread || r.pending) this.fetchUnread(); else this.showLastTurn();
       this.refreshStatus();
@@ -556,7 +555,8 @@ export default {
     }
     if (res.type === 'working') { this.poll(res.chat_id, res.index, this.epoch); return; }
     if (res.type === 'relay') {
-      this.speak(res.text);
+      // 只有出错和"允许/拒绝"的结果值得打断你；列表、切换、打开这些屏幕上有，不念
+      if (res.handled === 'error' || res.handled === 'verdict') this.speak(res.text);
       if (res.handled === 'verdict' && this.pendingChat) {
         const c = this.pendingChat; this.pendingChat = '';
         this.set('thinking', { answer: res.text });
