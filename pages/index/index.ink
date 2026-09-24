@@ -1,7 +1,7 @@
 <script def>
 {
   "navigationBarTitleText": "Claude",
-  "description": "管理用户电脑上多个 Claude Code 开发 agent：查看每个 agent 在做什么、切换、给某个 agent 下指令、批准或拒绝它的操作。",
+  "description": "管家：替用户盯着电脑上多个 Claude Code 开发 agent，汇报进度和阶段、转达指令、提醒需要用户决策或批准的事。",
   "schema": {
     "data": {
       "type": "object",
@@ -36,11 +36,13 @@ function flushLogs() {
 }
 // 仅测试构建为 true：浏览器预览没有语音识别，单击用预设句子代替
 const DEV_TEXT = 'false';
-const BUILD = '0923-1246';   // 构建来源提交，日志里能确认眼镜跑的是哪一版
+const BUILD = '0925-0005';   // 构建来源提交，日志里能确认眼镜跑的是哪一版
 
 const LISTEN_TIMEOUT_MS = 15000;
 const BOARD_POLL_MS = 8000;
 const SESSION_POLL_MS = 20000;
+const NOTICE_POLL_MS = 4000;   // 管家主动汇报的轮询间隔（眼镜端只能拉，不能被推）
+const CONCIERGE = 'concierge';
 const BOARD_ROWS = 8;          // 管理台一屏 4 个 agent，每个两行
 // 480x352 HUD，18px 字：每行约 24 个汉字，正文区约 11 行
 const LINE_CHARS = 24;
@@ -147,11 +149,31 @@ export default {
     this.startApp(q);
   },
 
-  startApp(q) {
-    this.showBoard();
+  async startApp(q) {
     if (!this.pollTimer) this.pollTimer = setInterval(() => this.tick(), BOARD_POLL_MS);
+    if (!this.noticeTimer) { this.noticeAfter = -1; this.noticeTimer = setInterval(() => this.pollNotices(), NOTICE_POLL_MS); this.pollNotices(); }
+    // 默认就在管家里：你只和它说话，它去盯其他 agent。管家不在就退回管理台
+    const ok = await this.enterSession(CONCIERGE);
+    if (!ok) this.showBoard();
     const real = this.launchIntent(q);
     if (real) this.ask(real);
+  },
+
+  // 管家的主动汇报：朗读短句；在管家页就上屏，其他页放在底栏
+  async pollNotices() {
+    try {
+      const r = await request('GET', '/api/glasses/notices?after=' + this.noticeAfter);
+      this.noticeAfter = r.latest;
+      (r.notices || []).forEach((n) => this.onNotice(n));
+    } catch (e) {}
+  },
+  onNotice(n) {
+    dlog('notice ' + n.id + ' ' + n.text);
+    this.speak(n.text);
+    const full = '【汇报】' + n.text + (n.detail ? '\n\n' + n.detail : '');
+    if (this.data.view === 'session' && this.curName === CONCIERGE && (this.data.status === 'idle' || this.data.status === 'error')) { this.showText(full); return; }
+    if (this.data.view === 'board') { this.data.boardHint = '【汇报】' + n.text; this.renderBoard(); return; }
+    this.setData({ foot: '【汇报】' + n.text });
   },
 
   // 系统助手唤起应用时，会把整句唤起语（"打开claude控制台"）当参数塞进来。
@@ -204,7 +226,7 @@ export default {
     }
   },
 
-  onUnload() { if (this.pollTimer) clearInterval(this.pollTimer); if (this.flushTimer) clearInterval(this.flushTimer); flushLogs(); },
+  onUnload() { if (this.noticeTimer) clearInterval(this.noticeTimer); if (this.pollTimer) clearInterval(this.pollTimer); if (this.flushTimer) clearInterval(this.flushTimer); flushLogs(); },
 
   tick() {
     if (this.data.view === 'board') { if (this.data.status !== 'listening' && this.data.status !== 'thinking') this.refreshBoard(); return; }
@@ -228,7 +250,9 @@ export default {
       const keep = this.board[this.sel] && this.board[this.sel].name;
       this.now = st.now || Date.now();
       // 先按需不需要处理，同一档内最近有动静的排前面
-      this.board = st.sessions.slice().sort((a, b) => attention(a) - attention(b) || (b.lastActivity || 0) - (a.lastActivity || 0) || a.index - b.index);
+      // 测试构建只看得到管家和沙盒：预览测试按位置进 agent，曾把测试语句发进真实工作会话并触发接管
+      const visible = DEV_TEXT === 'true' ? st.sessions.filter((s) => s.name === 'sandbox' || s.concierge) : st.sessions;
+      this.board = visible.slice().sort((a, b) => (b.concierge ? 1 : 0) - (a.concierge ? 1 : 0) || attention(a) - attention(b) || (b.lastActivity || 0) - (a.lastActivity || 0) || a.index - b.index);
       const i = this.board.findIndex((s) => s.name === keep);
       this.sel = i >= 0 ? i : 0;
       this.renderBoard();
@@ -242,8 +266,9 @@ export default {
     const rows = b.slice(start, start + BOARD_ROWS).map((s, k) => {
       const i = start + k, selected = i === this.sel;
       // 分支对所有 workbench 会话都一样，没有区分度，不显示；cockpit 里没接管的标出来
-      const state = !s.online ? '离线' : s.adoptable ? (s.pending ? '待确认·未接管' : s.busy ? '忙·未接管' : '未接管')
-        : s.pending ? '待批' : s.unread ? '新回复' + s.unread : s.busy ? '忙' + ago(this.now - s.busySince) : '空闲';
+      // 阶段比忙闲更有信息量；要你处理的（待批/等你/新回复）优先显示
+      const state = !s.online ? '离线' : s.pending ? '待批' : s.waiting ? '等你·' + (s.stage || '')
+        : s.unread ? '新回复' + s.unread : (s.stage || (s.adoptable ? '电脑' : '空闲')) + (s.busy ? '·忙' : '');
       const sub = s.adoptable ? (s.task ? '未接管 · ' + s.task : '未接管，单击进入会自动接管')
         : s.pending ? '待批：' + (s.permission || s.last || '等你确认')
         : s.unread ? '回复：' + s.last
@@ -277,12 +302,14 @@ export default {
     try {
       const r = await request('POST', '/api/glasses/select', { session: name });
       if (my !== this.epoch) return;
-      if (r.type !== 'selected') { this.setData({ foot: r.text || '进不去' }); return; }
+      if (r.type !== 'selected') { this.setData({ foot: r.text || '进不去' }); return false; }
+      this.curName = r.session || name;
       this.data.view = 'session';
       this.set('idle', { session: r.label + ' ' + r.index + '/' + r.total, heard: '', answer: '', hint: '' });
       if (r.unread || r.pending) this.fetchUnread(); else this.showLastTurn();
       this.refreshStatus();
-    } catch (e) { this.setData({ foot: String(e.message || e) }); }
+      return true;
+    } catch (e) { this.setData({ foot: String(e.message || e) }); return false; }
   },
 
   // ---------------------------------------------------------------- 会话页
@@ -303,6 +330,7 @@ export default {
     try {
       const r = await request('POST', '/api/glasses/select', { dir: dir });
       if (r.type !== 'selected') { this.set('error', { hint: r.text || '没有可切换的会话' }); return; }
+      this.curName = r.session;
       this.set('idle', { session: r.label + ' ' + r.index + '/' + r.total, heard: '', answer: '', hint: '' });
       if (r.unread || r.pending) this.fetchUnread(); else this.showLastTurn();
       this.refreshStatus();
