@@ -36,7 +36,7 @@ function flushLogs() {
 }
 // 仅测试构建为 true：浏览器预览没有语音识别，单击用预设句子代替
 const DEV_TEXT = 'false';
-const BUILD = '0925-0016';   // 构建来源提交，日志里能确认眼镜跑的是哪一版
+const BUILD = '0925-1138';   // 构建来源提交，日志里能确认眼镜跑的是哪一版
 
 const LISTEN_TIMEOUT_MS = 15000;
 const BOARD_POLL_MS = 8000;
@@ -237,7 +237,7 @@ export default {
   // ---------------------------------------------------------------- 管理台
   showBoard() {
     this.epoch++; this.pager = null; this.pendingChat = '';
-    // 离开会话即交还控制权：眼镜不在对话里就不该占着它，空闲的自动接管会话回到电脑
+    // 离开会话：告诉 relay 眼镜不在这个会话里了（旧的手动接管会话若空闲会还给电脑）
     request('POST', '/api/glasses/leave', {}).then(function (r) { if (r && r.released) dlog('released ' + r.released); }).catch(function () {});
     this.data.view = 'board'; this.setData({ status: 'idle' });
     dlog('board-view');
@@ -269,7 +269,8 @@ export default {
       // 阶段比忙闲更有信息量；要你处理的（待批/等你/新回复）优先显示
       const state = !s.online ? '离线' : s.pending ? '待批' : s.waiting ? '等你·' + (s.stage || '')
         : s.unread ? '新回复' + s.unread : (s.stage || (s.adoptable ? '电脑' : '空闲')) + (s.busy ? '·忙' : '');
-      const sub = s.adoptable ? (s.task ? '未接管 · ' + s.task : '未接管，单击进入会自动接管')
+      // 电脑上的会话：说话会原地敲进它的输入框，不接管
+      const sub = s.adoptable ? (s.pending ? '在电脑上等确认：' + (s.permission || '') : s.task ? '在做：' + s.task : s.last ? '最近：' + s.last : '电脑上的会话')
         : s.pending ? '待批：' + (s.permission || s.last || '等你确认')
         : s.unread ? '回复：' + s.last
         : s.busy ? '在做：' + (s.task || '…')
