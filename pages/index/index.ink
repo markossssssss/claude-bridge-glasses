@@ -36,7 +36,7 @@ function flushLogs() {
 }
 // 仅测试构建为 true：浏览器预览没有语音识别，单击用预设句子代替
 const DEV_TEXT = 'false';
-const BUILD = '0925-1439';   // 构建来源提交，日志里能确认眼镜跑的是哪一版
+const BUILD = '0925-1524';   // 构建来源提交，日志里能确认眼镜跑的是哪一版
 
 const LISTEN_TIMEOUT_MS = 15000;
 const STATUS_POLL_MS = 8000;   // 顶部状态行的刷新间隔
@@ -462,6 +462,8 @@ export default {
   handle(res, my) {
     if (my !== undefined && my !== this.epoch) return;  // 已切走：这条留作原会话的未读
     if (!res) { this.set('error', { hint: '空响应' }); return; }
+    // relay 按术语表纠正过识别结果：底栏告诉你改了什么（改错了你能看出来）
+    if (res.fixes && res.fixes.length) { this.footNote = '已纠正：' + res.fixes.map((f) => f[0] + '→' + f[1]).join('，'); dlog('fixes ' + this.footNote); }
     if (res.type === 'reply') {
       const text = res.display ? res.text + '（已放到 pad）' : res.text;
       this.speak(text);  // 只朗读简短的 text；屏幕显示 text + detail
