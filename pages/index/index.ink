@@ -36,14 +36,12 @@ function flushLogs() {
 }
 // 仅测试构建为 true：浏览器预览没有语音识别，单击用预设句子代替
 const DEV_TEXT = 'false';
-const BUILD = '0925-1138';   // 构建来源提交，日志里能确认眼镜跑的是哪一版
+const BUILD = '0925-1439';   // 构建来源提交，日志里能确认眼镜跑的是哪一版
 
 const LISTEN_TIMEOUT_MS = 15000;
-const BOARD_POLL_MS = 8000;
-const SESSION_POLL_MS = 20000;
+const STATUS_POLL_MS = 8000;   // 顶部状态行的刷新间隔
 const NOTICE_POLL_MS = 4000;   // 管家主动汇报的轮询间隔（眼镜端只能拉，不能被推）
 const CONCIERGE = 'concierge';
-const BOARD_ROWS = 8;          // 管理台一屏 4 个 agent，每个两行
 // 480x352 HUD，18px 字：每行约 24 个汉字，正文区约 11 行
 const LINE_CHARS = 24;
 const PAGE_LINES = 11;
@@ -100,40 +98,37 @@ function clipW(s, units) {
 function toLines(text) {
   return String(text || '').split('\n').map((t, i) => ({ id: 's' + i, cls: 'ln', bcls: 'bar', tcls: t.indexOf('你：') === 0 ? 'tx q' : 'tx', t: t || ' ' }));
 }
-function ago(ms) {
-  if (!ms) return '';
-  const m = Math.floor(ms / 60000);
-  return m < 1 ? '刚刚' : m < 60 ? m + '分' : Math.floor(m / 60) + '时' + (m % 60 ? m % 60 + '分' : '');
-}
-// 需要人处理的排前面：待批 > 新回复 > 忙 > 空闲 > 离线
-function attention(s) { return !s.online ? 4 : s.pending ? 0 : s.unread ? 1 : s.busy ? 2 : 3; }
 
+// 只有一个对话页：顶部一行全局状态，中间是对话，底栏是提示。
+// 默认对象是管家；说"接通X"之后话直接发给 X（电脑上的会话也行），说"回来"回到管家。
+// 手势只有三个：单击说话；向后滑往回翻（历史/长回复）；向前滑往前翻，翻到头回到最新。双击是系统的退出。
 export default {
-  data: {
-    view: 'board',
-    // 管理台
-    boardTop: 'Agent 管理台', boardHint: '', foot: '',
-    // 会话页
-    status: 'idle', label: '单击说话', heard: '', answer: '', hint: '', top: '单击说话', main: '', lines: [], session: '', others: '',
-  },
-  board: [], sel: 0, now: 0, sessionTicks: 0,
-  recognition: null, listenTimer: null, pollTimer: null, flushTimer: null, hookTimer: null, aborting: false,
-  pendingChat: '', pendingIndex: 0,
-  lastSwipe: 0, pager: null, epoch: 0, devTurn: 0,
-  target: '',        // 管理台上说话时对哪个 agent
+  data: { view: 'chat', status: 'idle', heard: '', answer: '', hint: '', top: '管家', lines: [], foot: '' },
+  focus: { name: CONCIERGE, label: '管家' },
+  overview: '', footNote: '',
+  recognition: null, listenTimer: null, statusTimer: null, noticeTimer: null, flushTimer: null, hookTimer: null, aborting: false,
+  pendingChat: '', pendingIndex: 0, lastSwipe: 0, pager: null, epoch: 0, devTurn: 0, noticeAfter: -1,
 
-  // ---------------------------------------------------------------- 会话页状态
+  // ---------------------------------------------------------------- 画面
+  topLine() {
+    const who = this.focus.name === CONCIERGE ? '管家' : '接通：' + this.focus.label;
+    return clipW(who + (this.overview ? ' · ' + this.overview : ''), 26);
+  },
+  footLine(status) {
+    if (this.footNote) return this.footNote;
+    const f = { listening: '在听… 单击结束 · 滑动放弃', thinking: '处理中…', confirm: '说"允许"或"拒绝"', error: '单击重试' }[status];
+    if (f) return f;
+    return this.focus.name === CONCIERGE ? '单击说话 · 向后滑看历史' : '单击说话 · 说"回来"回到管家';
+  },
   set(status, patch) {
-    const labels = { idle: '单击说话', listening: '在听…', thinking: '处理中…', confirm: '说"允许"或"拒绝"', error: '出错了，单击重试', reading: '' };
-    dlog(status + ' ' + JSON.stringify(patch || {}));
-    const next = Object.assign({}, this.data, { status: status, label: labels[status] }, patch || {});
-    const base = (next.session ? '[' + next.session + '] ' : '') + next.label;
-    next.top = next.heard && status !== 'idle' ? base + ' · ' + next.heard : base;
-    next.main = next.hint ? (next.answer ? next.answer + '\n' + next.hint : next.hint) : next.answer;
-    if (this.data.view === 'board') return;  // 管理台由 renderBoard 负责画
-    this.setData(Object.assign({ status: status, label: labels[status], top: next.top, main: next.main, lines: toLines(next.main), foot: next.others || this.data.others }, patch || {}));
+    dlog(status + ' [' + this.topLine() + '] ' + JSON.stringify(patch || {}));
+    const d = Object.assign({}, this.data, patch || {});
+    let main = d.answer || '';
+    if (status === 'listening') main = '在听…' + (d.heard ? '\n' + d.heard : '');
+    else if (status === 'thinking' && d.heard && !d.answer) main = '你：' + d.heard + '\n\n处理中…';
+    if (d.hint) main = main ? main + '\n' + d.hint : d.hint;
+    this.setData(Object.assign({}, patch || {}, { status: status, top: this.topLine(), lines: toLines(main), foot: this.footLine(status) }));
   },
-
   speak(text) {
     if (!text) return;
     try { speechSynthesis.speak(new SpeechSynthesisUtterance(text), 'enqueue'); }
@@ -148,18 +143,46 @@ export default {
     if (!TOKEN) { this.startPairing(); return; }
     this.startApp(q);
   },
-
   async startApp(q) {
-    if (!this.pollTimer) this.pollTimer = setInterval(() => this.tick(), BOARD_POLL_MS);
-    if (!this.noticeTimer) { this.noticeAfter = -1; this.noticeTimer = setInterval(() => this.pollNotices(), NOTICE_POLL_MS); this.pollNotices(); }
-    // 默认就在管家里：你只和它说话，它去盯其他 agent。管家不在就退回管理台
-    const ok = await this.enterSession(CONCIERGE);
-    if (!ok) this.showBoard();
+    this.data.view = 'chat';
+    if (!this.statusTimer) this.statusTimer = setInterval(() => this.refreshOverview(), STATUS_POLL_MS);
+    if (!this.noticeTimer) { this.noticeTimer = setInterval(() => this.pollNotices(), NOTICE_POLL_MS); this.pollNotices(); }
+    await this.selectFocus(CONCIERGE, '管家');
     const real = this.launchIntent(q);
     if (real) this.ask(real);
   },
+  onUnload() { if (this.noticeTimer) clearInterval(this.noticeTimer); if (this.statusTimer) clearInterval(this.statusTimer); if (this.flushTimer) clearInterval(this.flushTimer); flushLogs(); },
 
-  // 管家的主动汇报：朗读短句；在管家页就上屏，其他页放在底栏
+  // ---------------------------------------------------------------- 对象与全局状态
+  async selectFocus(name, label) {
+    const my = ++this.epoch; this.pager = null; this.pendingChat = '';
+    let r = null;
+    try { r = await request('POST', '/api/glasses/select', { session: name }); } catch (e) {}
+    if (my !== this.epoch) return;
+    this.setFocus(name, (r && r.label) || label);
+    this.set('idle', { heard: '', answer: '', hint: '' });
+    this.refreshOverview();
+    if (r && (r.unread || r.pending)) this.fetchUnread(); else this.showLastTurn();
+  },
+  setFocus(name, label) {
+    if (this.focus.name === name && (!label || this.focus.label === label)) return;
+    this.focus = { name: name, label: label || (name === CONCIERGE ? '管家' : name) };
+    dlog('focus ' + name + ' ' + this.focus.label);
+  },
+  async refreshOverview() {
+    try {
+      const st = await request('GET', '/api/glasses/status');
+      const others = st.sessions.filter((s) => !s.concierge);
+      // 等你 = 有待批的确认，或处在真正任务阶段里标了"在等你"；问答类（杂项/已完成）不算
+      const wait = others.filter((s) => s.pending || (s.waiting && s.stage && s.stage !== '杂项' && s.stage !== '已完成'));
+      const busy = others.filter((s) => s.busy).length;
+      this.overview = others.length + '个' + (wait.length ? ' 等你' + wait.length : '') + (busy ? ' 忙' + busy : '') + (wait.length ? ' · ' + wait.map((s) => s.label).join('、') : '');
+      if (st.current) this.setFocus(st.current, st.currentLabel);   // 以 relay 为准：话发到哪，顶部就写哪
+      this.setData({ top: this.topLine() });
+    } catch (e) { dlog('status failed ' + (e.message || e)); }
+  },
+
+  // 管家的主动汇报：朗读短句；在管家对话里且空闲就上屏，否则放底栏，下次操作时清掉
   async pollNotices() {
     try {
       const r = await request('GET', '/api/glasses/notices?after=' + this.noticeAfter);
@@ -170,10 +193,12 @@ export default {
   onNotice(n) {
     dlog('notice ' + n.id + ' ' + n.text);
     this.speak(n.text);
-    const full = '【汇报】' + n.text + (n.detail ? '\n\n' + n.detail : '');
-    if (this.data.view === 'session' && this.curName === CONCIERGE && (this.data.status === 'idle' || this.data.status === 'error')) { this.showText(full); return; }
-    if (this.data.view === 'board') { this.data.boardHint = '【汇报】' + n.text; this.renderBoard(); return; }
-    this.setData({ foot: '【汇报】' + n.text });
+    if (this.focus.name === CONCIERGE && !this.pager && (this.data.status === 'idle' || this.data.status === 'error')) {
+      this.showText('【汇报】' + n.text + (n.detail ? '\n\n' + n.detail : ''));
+      return;
+    }
+    this.footNote = '【汇报】' + n.text;
+    this.setData({ foot: this.footNote });
   },
 
   // 系统助手唤起应用时，会把整句唤起语（"打开claude控制台"）当参数塞进来。
@@ -226,118 +251,7 @@ export default {
     }
   },
 
-  onUnload() { if (this.noticeTimer) clearInterval(this.noticeTimer); if (this.pollTimer) clearInterval(this.pollTimer); if (this.flushTimer) clearInterval(this.flushTimer); flushLogs(); },
-
-  tick() {
-    if (this.data.view === 'board') { if (this.data.status !== 'listening' && this.data.status !== 'thinking') this.refreshBoard(); return; }
-    this.sessionTicks += 1;
-    if (this.sessionTicks * BOARD_POLL_MS >= SESSION_POLL_MS && (this.data.status === 'idle' || this.data.status === 'confirm')) { this.sessionTicks = 0; this.refreshStatus(); }
-  },
-
-  // ---------------------------------------------------------------- 管理台
-  showBoard() {
-    this.epoch++; this.pager = null; this.pendingChat = '';
-    // 离开会话：告诉 relay 眼镜不在这个会话里了（旧的手动接管会话若空闲会还给电脑）
-    request('POST', '/api/glasses/leave', {}).then(function (r) { if (r && r.released) dlog('released ' + r.released); }).catch(function () {});
-    this.data.view = 'board'; this.setData({ status: 'idle' });
-    dlog('board-view');
-    this.refreshBoard();
-  },
-
-  async refreshBoard() {
-    try {
-      const st = await request('GET', '/api/glasses/status');
-      const keep = this.board[this.sel] && this.board[this.sel].name;
-      this.now = st.now || Date.now();
-      // 先按需不需要处理，同一档内最近有动静的排前面
-      // 测试构建只看得到管家和沙盒：预览测试按位置进 agent，曾把测试语句发进真实工作会话并触发接管
-      const visible = DEV_TEXT === 'true' ? st.sessions.filter((s) => s.name === 'sandbox' || s.concierge) : st.sessions;
-      this.board = visible.slice().sort((a, b) => (b.concierge ? 1 : 0) - (a.concierge ? 1 : 0) || attention(a) - attention(b) || (b.lastActivity || 0) - (a.lastActivity || 0) || a.index - b.index);
-      const i = this.board.findIndex((s) => s.name === keep);
-      this.sel = i >= 0 ? i : 0;
-      this.renderBoard();
-    } catch (e) { this.setData({ foot: '连不上 relay：' + (e.message || e) }); dlog('board failed ' + (e.message || e)); }
-  },
-
-  renderBoard() {
-    const b = this.board, n = b.length;
-    const busy = b.filter((s) => s.busy).length, pend = b.filter((s) => s.pending).length, unread = b.filter((s) => s.unread).length;
-    const start = Math.max(0, Math.min(this.sel - 2, n - BOARD_ROWS));
-    const rows = b.slice(start, start + BOARD_ROWS).map((s, k) => {
-      const i = start + k, selected = i === this.sel;
-      // 分支对所有 workbench 会话都一样，没有区分度，不显示；cockpit 里没接管的标出来
-      // 阶段比忙闲更有信息量；要你处理的（待批/等你/新回复）优先显示
-      const state = !s.online ? '离线' : s.pending ? '待批' : s.waiting ? '等你·' + (s.stage || '')
-        : s.unread ? '新回复' + s.unread : (s.stage || (s.adoptable ? '电脑' : '空闲')) + (s.busy ? '·忙' : '');
-      // 电脑上的会话：说话会原地敲进它的输入框，不接管
-      const sub = s.adoptable ? (s.pending ? '在电脑上等确认：' + (s.permission || '') : s.task ? '在做：' + s.task : s.last ? '最近：' + s.last : '电脑上的会话')
-        : s.pending ? '待批：' + (s.permission || s.last || '等你确认')
-        : s.unread ? '回复：' + s.last
-        : s.busy ? '在做：' + (s.task || '…')
-        : s.last ? '最近：' + s.last : s.task ? '最近：' + s.task : '还没有对话';
-      const lvl = selected ? ' sel' : attention(s) <= 1 ? ' hot' : '';
-      return { title: clipW(s.label + ' · ' + state, 23), sub: clipW(sub, 26), lvl: lvl, selected: selected, id: s.name };
-    });
-    const lines = [];
-    rows.forEach((r, k) => {
-      lines.push({ id: 'bt' + k, cls: 'ln row' + r.lvl, bcls: r.selected ? 'bar on' : 'bar', tcls: 'tx bt', t: r.title });
-      // 只有选中的展开详情，一屏能多放几个 agent
-      if (r.selected) lines.push({ id: 'bs' + k, cls: 'ln row gap' + r.lvl, bcls: 'bar', tcls: 'tx bs', t: r.sub });  // 竖条只画在标题行
-    });
-    if (!rows.length) lines.push({ id: 'b-empty', cls: 'ln', bcls: 'bar', tcls: 'tx', t: '还没有 agent，说"新建会话叫…"' });
-    const top = 'Agent 管理台 · ' + n + '个' + (busy ? ' · 忙' + busy : '') + (pend ? ' · 待批' + pend : '') + (unread ? ' · 新回复' + unread : '');
-    const foot = n ? (this.sel + 1) + '/' + n + ' 滑动选择 · 单击进入 · 说话=对选中的' : '';
-    this.setData({ top: top, lines: lines, foot: this.data.boardHint || foot, boardTop: top });
-    this.data.boardHint = '';
-    dlog('board ' + JSON.stringify({ sel: this.sel, rows: rows.map((r) => r.title) }));
-  },
-
-  moveSel(dir) {
-    if (!this.board.length) return;
-    this.sel = (this.sel + dir + this.board.length) % this.board.length;
-    this.renderBoard();  // 不朗读：滑动是高频动作，TTS 有延迟且会压掉下一次识别
-  },
-
-  async enterSession(name) {
-    const my = ++this.epoch; this.pager = null; this.pendingChat = '';
-    try {
-      const r = await request('POST', '/api/glasses/select', { session: name });
-      if (my !== this.epoch) return;
-      if (r.type !== 'selected') { this.setData({ foot: r.text || '进不去' }); return false; }
-      this.curName = r.session || name;
-      this.data.view = 'session';
-      this.set('idle', { session: r.label + ' ' + r.index + '/' + r.total, heard: '', answer: '', hint: '' });
-      if (r.unread || r.pending) this.fetchUnread(); else this.showLastTurn();
-      this.refreshStatus();
-      return true;
-    } catch (e) { this.setData({ foot: String(e.message || e) }); return false; }
-  },
-
-  // ---------------------------------------------------------------- 会话页
-  async refreshStatus() {
-    try {
-      const st = await request('GET', '/api/glasses/status');
-      const cur = st.sessions.find((x) => x.name === st.current);
-      const others = st.sessions.filter((x) => x.name !== st.current && (x.unread || x.pending))
-        .map((x) => x.label + (x.unread ? ' 新回复' + x.unread : '') + (x.pending ? ' 待批' + x.pending : '')).join(' · ');
-      const o = (others ? others + ' · ' : '') + '向前滑回管理台 · 向后滑看历史';
-      this.setData(this.data.view === 'session' ? { others: o, foot: o } : { others: o });
-      if (cur && this.data.view === 'session') this.set(this.data.status, { session: cur.label + ' ' + cur.index + '/' + st.sessions.length });
-    } catch (e) { dlog('status failed ' + (e.message || e)); }
-  },
-
-  async switchSession(dir) {
-    this.epoch++; this.pendingChat = ''; this.pager = null;
-    try {
-      const r = await request('POST', '/api/glasses/select', { dir: dir });
-      if (r.type !== 'selected') { this.set('error', { hint: r.text || '没有可切换的会话' }); return; }
-      this.curName = r.session;
-      this.set('idle', { session: r.label + ' ' + r.index + '/' + r.total, heard: '', answer: '', hint: '' });
-      if (r.unread || r.pending) this.fetchUnread(); else this.showLastTurn();
-      this.refreshStatus();
-    } catch (e) { this.set('error', { hint: String(e.message || e) }); }
-  },
-
+  // ---------------------------------------------------------------- 对话内容
   async fetchUnread() {
     const my = this.epoch;
     try {
@@ -346,23 +260,21 @@ export default {
       this.handle(r, my);
     } catch (e) { dlog('unread failed'); }
   },
-
   async showLastTurn() {
-    const my = this.epoch;
+    const my = this.epoch; this.pager = null;
     try {
-      const r = await request('GET', '/api/glasses/history?limit=1');
-      if (my !== this.epoch || !r.items || !r.items.length) return;
-      // 进入 agent 时只看一眼最新进展：显示第一屏，不进入分页；完整内容向后滑进历史看
+      const r = await request('GET', '/api/glasses/history?limit=1&session=' + encodeURIComponent(this.focus.name));
+      if (my !== this.epoch) return;
+      if (!r.items || !r.items.length) { this.set('idle', { answer: this.focus.name === CONCIERGE ? '单击说话。比如"大家在干嘛""让早鸟对接先发 testing"' : '还没有对话' }); return; }
+      // 只显示最新一轮的第一屏；完整内容向后滑看
       const pages = paginate(this.turnText(r.items[r.items.length - 1]));
-      this.pager = null;
-      this.set('idle', { answer: pages[0] + (pages.length > 1 ? '\n…（向后滑看完整历史）' : '') });
+      this.set('idle', { answer: pages[0] + (pages.length > 1 ? '\n…（向后滑看完整）' : '') });
     } catch (e) {}
   },
-
-  agentFoot() { return this.data.others || '向前滑回管理台 · 向后滑看历史'; },
-
-  turnText(t) { return [t.q ? '你：' + t.q : '', t.a ? 'Claude：' + t.a : ''].filter(Boolean).join('\n\n'); },
-
+  turnText(t) {
+    if (t.q === '（主动汇报）') return '【汇报】' + (t.a || '');
+    return [t.q ? '你：' + t.q : '', t.a ? this.focus.label + '：' + t.a : ''].filter(Boolean).join('\n\n');
+  },
   // 一页放得下就直接显示，放不下进入分页阅读
   showText(text, status) {
     const pages = paginate(text);
@@ -370,18 +282,16 @@ export default {
     this.pager = { pages: pages, labels: pages.map((_, i) => '第' + (i + 1) + '/' + pages.length + '页'), idx: 0, after: status || 'idle' };
     this.showPage(0);
   },
-
   async openHistory() {
     const my = this.epoch;
-    this.set('thinking', { hint: '读取历史…' });
+    this.set('thinking', { heard: '', answer: '', hint: '读取历史…' });
     try {
-      const r = await request('GET', '/api/glasses/history?limit=20');
+      const r = await request('GET', '/api/glasses/history?limit=20&session=' + encodeURIComponent(this.focus.name));
       if (my === this.epoch) this.enterHistory(r.items);
     } catch (e) { if (my === this.epoch) this.set('error', { hint: String(e.message || e) }); }
   },
-
   enterHistory(items) {
-    if (!items || !items.length) { this.set('idle', { answer: '还没有对话记录' }); return; }
+    if (!items || !items.length) { this.set('idle', { answer: '还没有对话记录', hint: '' }); return; }
     const pages = [], labels = [];
     for (let k = items.length - 1; k >= 0; k--) {
       const ps = paginate(this.turnText(items[k]));
@@ -390,32 +300,25 @@ export default {
     this.pager = { pages: pages, labels: labels, idx: 0, after: 'idle' };
     this.showPage(0);
   },
-
   showPage(i) {
     const p = this.pager; if (!p) return;
     p.idx = Math.max(0, Math.min(p.pages.length - 1, i));
-    this.set('reading', { label: p.labels[p.idx], heard: '', answer: p.pages[p.idx], hint: '' });
-    this.setData({ foot: (p.idx < p.pages.length - 1 ? '向后滑下一页 · ' : '已到最后 · ') + (p.idx > 0 ? '向前滑上一页' : '向前滑退出阅读') });
+    this.set('reading', { page: p.labels[p.idx], heard: '', answer: p.pages[p.idx], hint: '' });
+    this.setData({ foot: p.labels[p.idx] + ' · ' + (p.idx < p.pages.length - 1 ? '向后滑继续' : '已到最后') + ' · ' + (p.idx > 0 ? '向前滑回看' : '向前滑回到最新') });
   },
-
   exitPager() {
     const p = this.pager; this.pager = null;
-    this.set(p && p.after === 'confirm' ? 'confirm' : 'idle', { answer: p ? p.pages[0] : '', hint: '' });
-    this.setData({ foot: this.agentFoot() });
+    if (p && p.after === 'confirm') { this.set('confirm', { answer: p.pages[0], hint: '' }); return; }
+    this.showLastTurn();
   },
 
   // ---------------------------------------------------------------- 输入
-  onVoiceWakeup(event) {
-    // 接管 AI 键 / 唤醒词：由本应用来听
-    event.preventDefault();
-    this.listen();
-  },
+  onVoiceWakeup(event) { event.preventDefault(); this.listen(); },
 
   // 真机实测（2026-09-23 日志统计）：
   //   单击 = GlobalHook → Enter（间隔 147–540ms，中位 494）
   //   滑动 = GlobalHook → ArrowRight/Left → ArrowDown/Up（首个方向键 9–345ms）
-  //   双击 = GlobalHook ×2 → Backspace
-  // 所以 GlobalHook 只当"触控板被碰到"，不据此做动作；动作只看 Enter / 方向键 / Backspace。
+  //   双击 = GlobalHook ×2 → Backspace（多数宿主直接当系统"退出应用"，不发给页面）
   onKeyDown(event) {
     dlog('key down ' + event.code + ' ' + (event.key || ''));
     const dir = this.swipeDir(event);
@@ -425,28 +328,22 @@ export default {
     const now = Date.now();
     if (this.lastSwipe && now - this.lastSwipe < 250) return;  // 一次滑动会连发两个方向键
     this.lastSwipe = now;
-    if (this.data.status === 'listening') this.abortListen();  // 听的时候滑动 = 放弃这次说话
-    if (this.data.view === 'board') { this.moveSel(dir); return; }
-    // 双击是系统级"退出应用"，不会发给页面，所以返回靠向前滑：
-    //   阅读中：向后滑下一页，向前滑上一页，第一页再向前滑退出阅读
-    //   agent 页：向前滑回管理台，向后滑看这个 agent 的历史
+    this.footNote = '';
+    if (this.data.status === 'listening') { this.abortListen(); return; }  // 听的时候滑动 = 放弃这次说话
     if (this.pager) {
       if (dir > 0) this.showPage(this.pager.idx + 1);
       else if (this.pager.idx > 0) this.showPage(this.pager.idx - 1);
       else this.exitPager();
       return;
     }
-    if (dir < 0) { this.showBoard(); return; }
-    this.openHistory();
+    if (dir > 0) this.openHistory(); else this.showLastTurn();
   },
-
   swipeDir(event) {
     const c = event.code || event.key || '';
     if (c === 'ArrowDown' || c === 'ArrowRight' || c === 'PageDown') return 1;
     if (c === 'ArrowUp' || c === 'ArrowLeft' || c === 'PageUp') return -1;
     return 0;
   },
-
   onKeyUp(event) {
     dlog('key up ' + event.code + ' ' + (event.key || ''));
     if (this.swipeDir(event)) { event.preventDefault(); return; }
@@ -457,34 +354,25 @@ export default {
       this.hookTimer = setTimeout(() => { this.hookTimer = null; dlog('hook fallback tap'); this.tap(); }, 800);
       return;
     }
-    // 返回键（有的宿主双击发 Backspace）：管理台上交给系统（退出应用），其他情况按双击处理
+    // 返回键：在听/在翻页/接通着别人时当"返回"；否则交给系统（退出应用）
     if (event.code === 'Backspace') {
-      if (this.data.view === 'board' && this.data.status !== 'listening') return;
-      event.preventDefault(); this.cancelHook(); this.doubleTap(); return;
+      if (this.data.status !== 'listening' && !this.pager && this.focus.name === CONCIERGE) return;
+      event.preventDefault(); this.cancelHook(); this.goBack(); return;
     }
     if (event.code !== 'Enter') return;
     this.cancelHook();
     this.tap();  // 单击：语音识别就在这个事件里同步启动（必须在用户交互当下）
   },
-
-  // 双击 = 返回：在听 → 停止；阅读中 → 退出阅读；agent 页 → 回管理台；管理台 → 不动
-  doubleTap() {
-    dlog('double tap');
+  goBack() {
+    dlog('back');
     if (this.data.status === 'listening') { this.abortListen(); return; }
     if (this.pager) { this.exitPager(); return; }
-    if (this.data.view === 'session') { this.showBoard(); return; }
+    if (this.focus.name !== CONCIERGE) this.ask('回来');
   },
-
   cancelHook() { if (this.hookTimer) { clearTimeout(this.hookTimer); this.hookTimer = null; } },
-
   tap() {
     if (this.data.view === 'pair') { this.startPairing(); return; }
-    if (this.data.view === 'board') {
-      if (this.data.status === 'listening') { this.stopListening(); return; }
-      const s = this.board[this.sel];
-      if (s) this.enterSession(s.name); else this.listen();
-      return;
-    }
+    this.footNote = '';
     if (this.pager) { this.pager = null; this.listen(); return; }
     if (this.data.status === 'thinking') { this.set('thinking', { hint: '还在处理，稍等' }); return; }
     if (this.data.status === 'listening') { this.stopListening(); return; }
@@ -501,10 +389,10 @@ export default {
 
   listen() {
     // 管理台上说的话默认对选中的 agent；管理命令由 relay 识别
-    this.target = this.data.view === 'board' && this.board[this.sel] ? this.board[this.sel].name : '';
     if (DEV_TEXT === 'true') {
       this.devTurn = (this.devTurn || 0) + 1;
-      const script = ['一句话告诉我3加5等于几', '有哪些会话', '只读，不要修改任何东西：列出 /home/details-admin/JUSHOOP/workbench 根目录下所有文件和目录名，每个一行，全部放进 detail', '看看历史'];
+      // 预览测试的台词：只接通沙盒，不碰真实工作会话
+      const script = ['接通沙盒', '一句话告诉我3加5等于几', '只读，不要修改任何东西：列出 /home/details-admin/JUSHOOP/workbench 根目录下所有文件和目录名，每个一行，全部放进 detail', '看看历史', '回来'];
       this.ask(this.data.status === 'confirm' ? '允许' : script[Math.min(this.devTurn - 1, script.length - 1)]);
       return;
     }
@@ -527,8 +415,7 @@ export default {
       if (res && res.isFinal) finalText += t;
       heard = finalText || t;
       dlog('sr result +' + (Date.now() - t0) + 'ms final=' + !!(res && res.isFinal) + ' ' + JSON.stringify(t));
-      if (this.data.view === 'board') this.setData({ foot: '在听… ' + heard });
-      else this.setData({ heard: heard, top: '在听… · ' + heard });
+      this.set('listening', { heard: heard });
     };
     r.onerror = (e) => {
       dlog('sr error +' + (Date.now() - t0) + 'ms ' + (e && e.error) + ' ' + (e && e.message));
@@ -543,8 +430,7 @@ export default {
       if (text) this.ask(text); else this.afterListen('没听清（' + (Date.now() - t0) + 'ms）');
     };
     this.recognition = r;
-    if (this.data.view === 'board') { this.setData({ status: 'listening', foot: '在听…（说命令，或对选中的 agent 说）' }); dlog('listening board'); }
-    else this.set('listening', { heard: '', hint: '' });
+    this.set('listening', { heard: '', hint: '', answer: '' });
     this.listenTimer = setTimeout(() => {
       this.stopListening();
       // 宿主出错时 onerror/onend 可能都不来：再等 3 秒仍在听就强制复位
@@ -553,13 +439,8 @@ export default {
     try { r.start(); dlog('sr start() called'); } catch (e) { dlog('sr start() threw ' + (e && (e.name + ' ' + e.message))); this.clearListen(); this.afterListen('无法开始识别：' + (e && e.name)); }
   },
 
-  afterListen(msg) {
-    if (this.data.view === 'board') { this.setData({ status: 'idle' }); this.data.boardHint = msg; this.renderBoard(); return; }
-    this.set(this.pendingChat ? 'confirm' : 'idle', { hint: msg });
-  },
-
+  afterListen(msg) { this.set(this.pendingChat ? 'confirm' : 'idle', { hint: msg }); },
   stopListening() { if (this.recognition) { try { this.recognition.stop(); } catch (e) {} } },
-
   clearListen() {
     if (this.listenTimer) { clearTimeout(this.listenTimer); this.listenTimer = null; }
     this.recognition = null;
@@ -567,24 +448,17 @@ export default {
 
   // ---------------------------------------------------------------- 与 relay 交互
   async ask(text) {
-    this.pager = null;
-    const fromBoard = this.data.view === 'board';
-    const body = { text: text };
-    if (fromBoard && this.target) body.session = this.target;
-    // 从管理台发出：进入会话页看结果（管理命令的回复会自行回管理台）
-    if (fromBoard) this.data.view = 'session';
+    this.pager = null; this.footNote = '';
     const my = ++this.epoch;
     this.set('thinking', { heard: text, hint: '', answer: '' });
-    try { this.handle(await request('POST', '/api/glasses/ask', body), my); }
+    // 明确带上"发给谁"：relay 重启后记不住当前对象，不能让它猜
+    try { this.handle(await request('POST', '/api/glasses/ask', { text: text, session: this.focus.name }), my); }
     catch (e) { if (my === this.epoch) this.set('error', { hint: String(e.message || e) }); }
-    if (fromBoard && this.data.view === 'session') this.refreshStatus();
   },
-
   async poll(chatId, after, my) {
     try { this.handle(await request('GET', '/api/glasses/wait?chat_id=' + chatId + '&after=' + after), my); }
     catch (e) { if (my === this.epoch) this.set('error', { hint: String(e.message || e) }); }
   },
-
   handle(res, my) {
     if (my !== undefined && my !== this.epoch) return;  // 已切走：这条留作原会话的未读
     if (!res) { this.set('error', { hint: '空响应' }); return; }
@@ -599,12 +473,12 @@ export default {
     if (res.type === 'permission') {
       this.pendingChat = res.chat_id; this.pendingIndex = res.index;
       this.set('confirm', { answer: '要执行：' + res.description + (res.tool_name ? '（' + res.tool_name + '）' : '') });
-      this.speak('Claude 想要' + res.description + '，说允许或拒绝');
+      this.speak(this.focus.label + '想要' + res.description + '，说允许或拒绝');
       return;
     }
     if (res.type === 'working') { this.poll(res.chat_id, res.index, this.epoch); return; }
     if (res.type === 'relay') {
-      // 只有出错和"允许/拒绝"的结果值得打断你；列表、切换、打开这些屏幕上有，不念
+      // 只有出错和"允许/拒绝"的结果值得打断你；其余屏幕上有，不念
       if (res.handled === 'error' || res.handled === 'verdict') this.speak(res.text);
       if (res.handled === 'verdict' && this.pendingChat) {
         const c = this.pendingChat; this.pendingChat = '';
@@ -613,12 +487,12 @@ export default {
         return;
       }
       if (res.handled === 'history') { this.enterHistory(res.items); return; }
-      if (res.handled === 'back') { this.showBoard(); return; }
-      // 列表/关闭/新消息这类全局命令：回管理台看全局
-      if (['list', 'close', 'unread'].indexOf(res.handled) >= 0) { this.data.boardHint = res.text; this.showBoard(); return; }
-      if (['switch', 'open', 'new', 'fork', 'rename'].indexOf(res.handled) >= 0) { this.epoch++; this.pendingChat = ''; this.pager = null; this.refreshStatus(); }
+      // 接通 / 回来 / 打开 / 新建：换对象
+      if (['switch', 'open', 'back', 'new', 'fork'].indexOf(res.handled) >= 0 && res.session) {
+        this.setFocus(res.session, res.label);
+        this.refreshOverview();
+      }
       this.set(res.handled === 'error' ? 'error' : 'idle', { answer: res.text });
-      if (res.handled === 'switch' || res.handled === 'open') this.fetchUnread();
       return;
     }
     this.set('error', { hint: res.text || ('未知响应 ' + res.type) });
@@ -640,21 +514,12 @@ export default {
 </page>
 <style>
 .page { width: 100%; height: 100%; padding: 12px 14px 10px 8px; background: #000000; display: flex; flex-direction: column; }
-.top { color: #00ff00; opacity: 0.55; font-size: 16px; margin-bottom: 8px; padding-left: 14px; }
+.top { color: #00ff00; opacity: 0.7; font-size: 16px; margin-bottom: 8px; padding-left: 14px; }
 .main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
 .ln { display: flex; flex-direction: row; }
-/* 竖条：每行都有，只有选中行可见，保证文字对齐 */
 .bar { width: 14px; color: #00ff00; font-size: 18px; opacity: 0; }
-.bar.on { opacity: 1; }
 .tx { flex: 1; color: #00ff00; font-size: 18px; line-height: 1.33; }
 .tx.q { opacity: 0.55; font-size: 16px; }
-/* 管理台：未选中调暗、选中全亮；每个 agent 两行，组间留白 */
-.row { opacity: 0.72; }   /* 单色屏上内容要比页头亮 */
-.row.hot { opacity: 0.85; }
-.row.sel { opacity: 1; }
-.row.gap { margin-bottom: 14px; }
-.tx.bt { font-size: 20px; font-weight: bold; line-height: 1.7; }  /* 行距放大用掉底部空白，仍 8 行 */
-.tx.bs { font-size: 17px; opacity: 0.85; line-height: 1.5; }
 .rule { color: #00ff00; opacity: 0.3; font-size: 12px; padding-left: 14px; overflow: hidden; }
 .foot { color: #00ff00; opacity: 0.55; font-size: 14px; font-weight: bold; padding-left: 14px; }  /* 细笔画强光下先糊 */
 </style>
