@@ -1,5 +1,5 @@
 {
-  "pages": ["pages/index/index"],
+  "pages": ["pages/index/index", "pages/ask/index"],
   "permissions": ["INTERNET", "SPEECH_RECOGNITION", "SPEAKER", "RECORD_AUDIO"],
   "window": { "navigationBarTitleText": "Claude" }
 }

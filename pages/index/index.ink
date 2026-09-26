@@ -36,7 +36,7 @@ function flushLogs() {
 }
 // 仅测试构建为 true：浏览器预览没有语音识别，单击用预设句子代替
 const DEV_TEXT = 'false';
-const BUILD = '0926-1241';   // 构建来源提交，日志里能确认眼镜跑的是哪一版
+const BUILD = '0926-1350';   // 构建来源提交，日志里能确认眼镜跑的是哪一版
 
 const LISTEN_TIMEOUT_MS = 15000;
 const STATUS_POLL_MS = 8000;   // 顶部状态行的刷新间隔
@@ -139,7 +139,8 @@ export default {
   onLoad(options) {
     const q = options && (typeof options.query === 'string' ? options.query : options.text);
     this.flushTimer = setInterval(flushLogs, 2000);
-    dlog('load build=' + BUILD + ' token=' + (TOKEN ? 'yes' : 'no') + ' SR=' + typeof SpeechRecognition + ' query=' + JSON.stringify(q || ''));
+    // PREVIEW = 本机预览测试的构建；设备日志里靠它区分真机和测试
+    dlog('load build=' + BUILD + (DEV_TEXT === 'true' ? ' PREVIEW' : '') + ' token=' + (TOKEN ? 'yes' : 'no') + ' SR=' + typeof SpeechRecognition + ' query=' + JSON.stringify(q || ''));
     this.probeCaps();
     if (!TOKEN) { this.startPairing(); return; }
     this.startApp(q);
