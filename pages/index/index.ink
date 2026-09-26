@@ -36,7 +36,7 @@ function flushLogs() {
 }
 // 仅测试构建为 true：浏览器预览没有语音识别，单击用预设句子代替
 const DEV_TEXT = 'false';
-const BUILD = '0925-1524';   // 构建来源提交，日志里能确认眼镜跑的是哪一版
+const BUILD = '0926-1241';   // 构建来源提交，日志里能确认眼镜跑的是哪一版
 
 const LISTEN_TIMEOUT_MS = 15000;
 const STATUS_POLL_MS = 8000;   // 顶部状态行的刷新间隔
@@ -140,6 +140,7 @@ export default {
     const q = options && (typeof options.query === 'string' ? options.query : options.text);
     this.flushTimer = setInterval(flushLogs, 2000);
     dlog('load build=' + BUILD + ' token=' + (TOKEN ? 'yes' : 'no') + ' SR=' + typeof SpeechRecognition + ' query=' + JSON.stringify(q || ''));
+    this.probeCaps();
     if (!TOKEN) { this.startPairing(); return; }
     this.startApp(q);
   },
@@ -151,6 +152,25 @@ export default {
     const real = this.launchIntent(q);
     if (real) this.ask(real);
   },
+  // 能力探测：只写日志不改行为。热词/上下文（SpeechRecognitionSession）、Widget 等是 AIUI 0.18 才有的，
+  // 看设备日志决定下一步能上什么
+  probeCaps() {
+    const caps = {};
+    try { caps.ink = navigator.versions && navigator.versions.ink; } catch (e) {}
+    try { caps.ua = navigator.userAgent; } catch (e) {}
+    caps.SRS = typeof SpeechRecognitionSession;
+    caps.MR = typeof MediaRecorder;
+    try { caps.gum = typeof (navigator.mediaDevices && navigator.mediaDevices.getUserMedia); } catch (e) { caps.gum = 'err'; }
+    try { caps.ttsCancel = typeof speechSynthesis.cancel; } catch (e) { caps.ttsCancel = 'err'; }
+    dlog('caps ' + JSON.stringify(caps));
+    try {
+      if (caps.SRS !== 'undefined') SpeechRecognitionSession.getCapabilities()
+        .then((c) => dlog('asr caps ' + JSON.stringify(c)))
+        .catch((e) => dlog('asr caps failed ' + (e && e.message)));
+    } catch (e) { dlog('asr caps threw ' + (e && e.message)); }
+  },
+  stopSpeaking() { try { speechSynthesis.cancel(); } catch (e) {} },
+
   onUnload() { if (this.noticeTimer) clearInterval(this.noticeTimer); if (this.statusTimer) clearInterval(this.statusTimer); if (this.flushTimer) clearInterval(this.flushTimer); flushLogs(); },
 
   // ---------------------------------------------------------------- 对象与全局状态
@@ -191,6 +211,8 @@ export default {
     } catch (e) {}
   },
   onNotice(n) {
+    // 你正在说话时不插播：等说完再念，也免得播报声被麦克风收进去
+    if (this.data.status === 'listening') { setTimeout(() => this.onNotice(n), 1500); return; }
     dlog('notice ' + n.id + ' ' + n.text);
     this.speak(n.text);
     if (this.focus.name === CONCIERGE && !this.pager && (this.data.status === 'idle' || this.data.status === 'error')) {
@@ -372,6 +394,7 @@ export default {
   cancelHook() { if (this.hookTimer) { clearTimeout(this.hookTimer); this.hookTimer = null; } },
   tap() {
     if (this.data.view === 'pair') { this.startPairing(); return; }
+    this.stopSpeaking();   // 单击 = 我要说话：先停掉正在念的内容
     this.footNote = '';
     if (this.pager) { this.pager = null; this.listen(); return; }
     if (this.data.status === 'thinking') { this.set('thinking', { hint: '还在处理，稍等' }); return; }
